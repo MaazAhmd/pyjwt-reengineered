@@ -10,11 +10,10 @@ class JWKSetCache:
         self.lifespan = lifespan
 
     def put(self, jwk_set: PyJWKSet) -> None:
-        if jwk_set is not None:
-            self.jwk_set_with_timestamp = PyJWTSetWithTimestamp(jwk_set)
-        else:
-            # clear cache
-            self.jwk_set_with_timestamp = None
+        self.jwk_set_with_timestamp = PyJWTSetWithTimestamp(jwk_set)
+
+    def clear(self) -> None:
+        self.jwk_set_with_timestamp = None
 
     def get(self) -> Optional[PyJWKSet]:
         if self.jwk_set_with_timestamp is None or self.is_expired():

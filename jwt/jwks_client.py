@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
-import urllib.request
 from functools import lru_cache
 from ssl import SSLContext
 from typing import Any
-from urllib.error import HTTPError, URLError
 
 from .api_jwk import PyJWK, PyJWKSet
 from .api_jwt import decode_complete as decode_token
-from .exceptions import PyJWKClientConnectionError, PyJWKClientError
+from .exceptions import (
+    PyJWKClientConnectionError,
+    PyJWKClientError,
+    PyJWKSetError,
+)
 from .jwk_set_cache import JWKSetCache
+from .jwks_fetcher import JWKSFetcher
 
 
 class PyJWKClient:
@@ -69,11 +72,12 @@ class PyJWKClient:
         """
         if headers is None:
             headers = {}
+
         self.uri = uri
         self.jwk_set_cache: JWKSetCache | None = None
-        self.headers = headers
-        self.timeout = timeout
-        self.ssl_context = ssl_context
+        self.fetcher = JWKSFetcher(
+            uri=uri, headers=headers, timeout=timeout, ssl_context=ssl_context
+        )
 
         if cache_jwk_set:
             # Init jwt set cache with default or given lifespan.
@@ -92,35 +96,6 @@ class PyJWKClient:
             # Ignore mypy (https://github.com/python/mypy/issues/2427)
             self.get_signing_key = get_signing_key  # type: ignore[method-assign]
 
-    def fetch_data(self) -> Any:
-        """Fetch the JWK Set from the JWKS endpoint.
-
-        Makes an HTTP request to the configured ``uri`` and returns the
-        parsed JSON response. If the JWK Set cache is enabled, the
-        response is stored in the cache.
-
-        :returns: The parsed JWK Set as a dictionary.
-        :raises PyJWKClientConnectionError: If the HTTP request fails.
-        """
-        jwk_set: Any = None
-        try:
-            r = urllib.request.Request(url=self.uri, headers=self.headers)
-            with urllib.request.urlopen(
-                r, timeout=self.timeout, context=self.ssl_context
-            ) as response:
-                jwk_set = json.load(response)
-        except (URLError, TimeoutError) as e:
-            if isinstance(e, HTTPError):
-                e.close()
-            raise PyJWKClientConnectionError(
-                f'Fail to fetch data from the url, err: "{e}"'
-            ) from e
-        else:
-            return jwk_set
-        finally:
-            if self.jwk_set_cache is not None:
-                self.jwk_set_cache.put(jwk_set)
-
     def get_jwk_set(self, refresh: bool = False) -> PyJWKSet:
         """Return the JWK Set, using the cache when available.
 
@@ -132,17 +107,25 @@ class PyJWKClient:
         :raises PyJWKClientError: If the endpoint does not return a JSON
             object.
         """
-        data = None
         if self.jwk_set_cache is not None and not refresh:
-            data = self.jwk_set_cache.get()
+            cached_jwk_set = self.jwk_set_cache.get()
+            if cached_jwk_set is not None:
+                return cached_jwk_set
 
-        if data is None:
-            data = self.fetch_data()
+        try:
+            data = self.fetcher.fetch_data()
+            if not isinstance(data, dict):
+                raise PyJWKClientError("The JWKS endpoint did not return a JSON object")
 
-        if not isinstance(data, dict):
-            raise PyJWKClientError("The JWKS endpoint did not return a JSON object")
-
-        return PyJWKSet.from_dict(data)
+            jwk_set = PyJWKSet.from_dict(data)
+        except (PyJWKClientError, PyJWKSetError, TypeError, ValueError):
+            if self.jwk_set_cache is not None:
+                self.jwk_set_cache.clear()
+            raise
+        else:
+            if self.jwk_set_cache is not None:
+                self.jwk_set_cache.put(jwk_set)
+            return jwk_set
 
     def get_signing_keys(self, refresh: bool = False) -> list[PyJWK]:
         """Return all signing keys from the JWK Set.
@@ -182,18 +165,15 @@ class PyJWKClient:
         :raises PyJWKClientError: If no matching key is found after
             refreshing.
         """
-        signing_keys = self.get_signing_keys()
-        signing_key = self.match_kid(signing_keys, kid)
+        signing_key = self.match_kid(self.get_signing_keys(), kid)
+        if signing_key is not None:
+            return signing_key
 
-        if not signing_key:
-            # If no matching signing key from the jwk set, refresh the jwk set and try again.
-            signing_keys = self.get_signing_keys(refresh=True)
-            signing_key = self.match_kid(signing_keys, kid)
-
-            if not signing_key:
-                raise PyJWKClientError(
-                    f'Unable to find a signing key that matches: "{kid}"'
-                )
+        signing_key = self.match_kid(self.get_signing_keys(refresh=True), kid)
+        if signing_key is None:
+            raise PyJWKClientError(
+                f'Unable to find a signing key that matches: "{kid}"'
+            )
 
         return signing_key
 
