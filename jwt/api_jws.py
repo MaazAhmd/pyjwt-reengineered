@@ -6,12 +6,7 @@ import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from .algorithms import (
-    Algorithm,
-    get_default_algorithms,
-    has_crypto,
-    requires_cryptography,
-)
+from .algorithms import Algorithm
 from .registry import AlgorithmRegistry
 from .api_jwk import PyJWK
 from .exceptions import (
@@ -106,26 +101,9 @@ class PyJWS:
     ) -> str:
         segments: list[bytes] = []
 
-        # declare a new var to narrow the type for type checkers
-        if algorithm is _ALGORITHM_UNSET:
-            if isinstance(key, PyJWK):
-                algorithm_ = key.algorithm_name
-            else:
-                algorithm_ = "HS256"
-        elif algorithm is None:
-            if isinstance(key, PyJWK):
-                algorithm_ = key.algorithm_name
-            else:
-                algorithm_ = "none"
-        else:
-            algorithm_ = algorithm
+        algorithm_ = self._resolve_algorithm(algorithm, key, headers)
 
-        # Prefer headers values if present to function parameters.
         if headers:
-            headers_alg = headers.get("alg")
-            if headers_alg:
-                algorithm_ = headers["alg"]
-
             headers_b64 = headers.get("b64")
             if headers_b64 is False:
                 is_payload_detached = True
@@ -267,6 +245,34 @@ class PyJWS:
         self._validate_headers(headers)
 
         return headers
+
+    def _resolve_algorithm(
+        self,
+        algorithm: str | None,
+        key: AllowedPrivateKeys | PyJWK | str | bytes,
+        headers: dict[str, Any] | None,
+    ) -> str:
+        # resolving the algorithm from the key, parameter, and headers
+        # with a clear precedence: headers["alg"] > algorithm param > key default
+
+        # headers override takes top priority
+        if headers:
+            headers_alg = headers.get("alg")
+            if headers_alg:
+                return headers_alg
+
+        # explicit algorithm param
+        if algorithm is not _ALGORITHM_UNSET and algorithm is not None:
+            return algorithm
+
+        # letting the key decide when it's a PyJWK
+        if isinstance(key, PyJWK):
+            return key.algorithm_name
+
+        # falling back to defaults based on whether algorithm was unset or None
+        if algorithm is _ALGORITHM_UNSET:
+            return "HS256"
+        return "none"
 
     def _load(self, jwt: str | bytes) -> tuple[bytes, bytes, dict[str, Any], bytes]:
         if isinstance(jwt, str):
