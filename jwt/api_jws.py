@@ -12,6 +12,7 @@ from .algorithms import (
     has_crypto,
     requires_cryptography,
 )
+from .registry import AlgorithmRegistry
 from .api_jwk import PyJWK
 from .exceptions import (
     DecodeError,
@@ -38,15 +39,8 @@ class PyJWS:
         algorithms: Sequence[str] | None = None,
         options: SigOptions | None = None,
     ) -> None:
-        self._algorithms = get_default_algorithms()
-        self._valid_algs = (
-            set(algorithms) if algorithms is not None else set(self._algorithms)
-        )
-
-        # Remove algorithms that aren't on the whitelist
-        for key in list(self._algorithms.keys()):
-            if key not in self._valid_algs:
-                del self._algorithms[key]
+        # delegating registry responsibility to AlgorithmRegistry
+        self._registry = AlgorithmRegistry(algorithms)
 
         self.options: SigOptions = self._get_default_options()
         if options is not None:
@@ -64,14 +58,8 @@ class PyJWS:
         :param alg_obj: the Algorithm object
         :type alg_obj: Algorithm
         """
-        if alg_id in self._algorithms:
-            raise ValueError("Algorithm already has a handler.")
-
-        if not isinstance(alg_obj, Algorithm):
-            raise TypeError("Object is not of type `Algorithm`")
-
-        self._algorithms[alg_id] = alg_obj
-        self._valid_algs.add(alg_id)
+        # delegating to registry
+        self._registry.register(alg_id, alg_obj)
 
     def unregister_algorithm(self, alg_id: str) -> None:
         """
@@ -79,14 +67,8 @@ class PyJWS:
         :param str alg_id: the ID of the Algorithm
         :raises KeyError: if algorithm is not registered.
         """
-        if alg_id not in self._algorithms:
-            raise KeyError(
-                "The specified algorithm could not be removed"
-                " because it is not registered."
-            )
-
-        del self._algorithms[alg_id]
-        self._valid_algs.remove(alg_id)
+        # delegating to registry
+        self._registry.unregister(alg_id)
 
     def get_algorithms(self) -> list[str]:
         """
@@ -94,7 +76,8 @@ class PyJWS:
 
         :rtype: list[str]
         """
-        return list(self._valid_algs)
+        # delegating to registry
+        return self._registry.get_algorithms()
 
     def get_algorithm_by_name(self, alg_name: str) -> Algorithm:
         """
@@ -108,14 +91,8 @@ class PyJWS:
         :type alg_name: str
         :rtype: Algorithm
         """
-        try:
-            return self._algorithms[alg_name]
-        except KeyError as e:
-            if not has_crypto and alg_name in requires_cryptography:
-                raise NotImplementedError(
-                    f"Algorithm '{alg_name}' could not be found. Do you have cryptography installed?"
-                ) from e
-            raise NotImplementedError("Algorithm not supported") from e
+        # delegating to registry
+        return self._registry.get_algorithm(alg_name)
 
     def encode(
         self,
