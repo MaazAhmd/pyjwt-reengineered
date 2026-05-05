@@ -26,6 +26,30 @@ if TYPE_CHECKING:
 _ALGORITHM_UNSET = object()
 
 
+def _merge_options(base: "SigOptions", overrides: "SigOptions | None") -> "SigOptions":
+    if overrides is None:
+        return base
+    return {**base, **overrides}
+
+
+class _ResolvedKey:
+    __slots__ = ("algorithm_obj", "prepared_key")
+
+    def __init__(self, algorithm_obj: Algorithm, prepared_key: Any) -> None:
+        self.algorithm_obj = algorithm_obj
+        self.prepared_key = prepared_key
+
+    @classmethod
+    def from_jwk(cls, key: PyJWK) -> "_ResolvedKey":
+        return cls(algorithm_obj=key.Algorithm, prepared_key=key.key)
+
+    @classmethod
+    def from_raw(cls, key: Any, alg_name: str, registry: AlgorithmRegistry) -> "_ResolvedKey":
+        alg_obj = registry.get_algorithm(alg_name)
+        prepared = alg_obj.prepare_key(key)
+        return cls(algorithm_obj=alg_obj, prepared_key=prepared)
+
+
 class PyJWS:
     header_typ = "JWT"
 
@@ -37,9 +61,7 @@ class PyJWS:
         # delegating registry responsibility to AlgorithmRegistry
         self._registry = AlgorithmRegistry(algorithms)
 
-        self.options: SigOptions = self._get_default_options()
-        if options is not None:
-            self.options = {**self.options, **options}
+        self.options: SigOptions = _merge_options(self._get_default_options(), options)
 
     @staticmethod
     def _get_default_options() -> SigOptions:
@@ -139,19 +161,10 @@ class PyJWS:
         # Segments
         signing_input = b".".join(segments)
 
-        alg_obj = self.get_algorithm_by_name(algorithm_)
-        if isinstance(key, PyJWK):
-            key = key.key
-        key = alg_obj.prepare_key(key)
+        resolved = self._resolve_key(key, algorithm_)
+        self._enforce_key_length(resolved)
 
-        key_length_msg = alg_obj.check_key_length(key)
-        if key_length_msg:
-            if self.options.get("enforce_minimum_key_length", False):
-                raise InvalidKeyError(key_length_msg)
-            else:
-                warnings.warn(key_length_msg, InsecureKeyLengthWarning, stacklevel=2)
-
-        signature = alg_obj.sign(signing_input, key)
+        signature = resolved.algorithm_obj.sign(signing_input, resolved.prepared_key)
 
         segments.append(base64url_encode(signature))
 
@@ -179,11 +192,7 @@ class PyJWS:
                 RemovedInPyjwt3Warning,
                 stacklevel=2,
             )
-        merged_options: SigOptions
-        if options is None:
-            merged_options = self.options
-        else:
-            merged_options = {**self.options, **options}
+        merged_options = _merge_options(self.options, options)
 
         verify_signature = merged_options["verify_signature"]
 
@@ -274,6 +283,23 @@ class PyJWS:
             return "HS256"
         return "none"
 
+    def _resolve_key(
+        self,
+        key: AllowedPrivateKeys | AllowedPublicKeys | PyJWK | str | bytes,
+        alg_name: str,
+    ) -> _ResolvedKey:
+        if isinstance(key, PyJWK):
+            return _ResolvedKey.from_jwk(key)
+        return _ResolvedKey.from_raw(key, alg_name, self._registry)
+
+    def _enforce_key_length(self, resolved: _ResolvedKey, stacklevel: int = 2) -> None:
+        key_length_msg = resolved.algorithm_obj.check_key_length(resolved.prepared_key)
+        if key_length_msg:
+            if self.options.get("enforce_minimum_key_length", False):
+                raise InvalidKeyError(key_length_msg)
+            else:
+                warnings.warn(key_length_msg, InsecureKeyLengthWarning, stacklevel=stacklevel)
+
     def _load(self, jwt: str | bytes) -> tuple[bytes, bytes, dict[str, Any], bytes]:
         if isinstance(jwt, str):
             jwt = jwt.encode("utf-8")
@@ -330,24 +356,14 @@ class PyJWS:
         if not alg or (algorithms is not None and alg not in algorithms):
             raise InvalidAlgorithmError("The specified alg value is not allowed")
 
-        if isinstance(key, PyJWK):
-            alg_obj = key.Algorithm
-            prepared_key = key.key
-        else:
-            try:
-                alg_obj = self.get_algorithm_by_name(alg)
-            except NotImplementedError as e:
-                raise InvalidAlgorithmError("Algorithm not supported") from e
-            prepared_key = alg_obj.prepare_key(key)
+        try:
+            resolved = self._resolve_key(key, alg)
+        except NotImplementedError as e:
+            raise InvalidAlgorithmError("Algorithm not supported") from e
 
-        key_length_msg = alg_obj.check_key_length(prepared_key)
-        if key_length_msg:
-            if self.options.get("enforce_minimum_key_length", False):
-                raise InvalidKeyError(key_length_msg)
-            else:
-                warnings.warn(key_length_msg, InsecureKeyLengthWarning, stacklevel=4)
+        self._enforce_key_length(resolved, stacklevel=4)
 
-        if not alg_obj.verify(signing_input, prepared_key, signature):
+        if not resolved.algorithm_obj.verify(signing_input, resolved.prepared_key, signature):
             raise InvalidSignatureError("Signature verification failed")
 
     # Extensions that PyJWT actually understands and supports
