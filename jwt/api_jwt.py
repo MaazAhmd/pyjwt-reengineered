@@ -5,21 +5,12 @@ import os
 import warnings
 from calendar import timegm
 from collections.abc import Container, Iterable, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Union, cast
 
 from .api_jws import PyJWS, _ALGORITHM_UNSET, _jws_global_obj
-from .exceptions import (
-    DecodeError,
-    ExpiredSignatureError,
-    ImmatureSignatureError,
-    InvalidAudienceError,
-    InvalidIssuedAtError,
-    InvalidIssuerError,
-    InvalidJTIError,
-    InvalidSubjectError,
-    MissingRequiredClaimError,
-)
+from .claims import ClaimValidator, DecodeOptions, ValidationContext
+from .exceptions import DecodeError
 from .warnings import RemovedInPyjwt3Warning
 
 if TYPE_CHECKING or bool(os.getenv("SPHINX_BUILD", "")):
@@ -39,12 +30,14 @@ if TYPE_CHECKING or bool(os.getenv("SPHINX_BUILD", "")):
     AllowedPublicKeyTypes: TypeAlias = Union[AllowedPublicKeys, PyJWK, str, bytes]
 
 
+_claim_validator = ClaimValidator()
+
+
 class PyJWT:
     def __init__(self, options: Options | None = None) -> None:
-        self.options: FullOptions
-        self.options = self._get_default_options()
-        if options is not None:
-            self.options = self._merge_options(options)
+        self.options: FullOptions = DecodeOptions.build(
+            self._get_default_options(), options
+        ).as_full_options()
 
         self._jws = PyJWS(options=self._get_sig_options())
 
@@ -71,21 +64,6 @@ class PyJWT:
                 "enforce_minimum_key_length", False
             ),
         }
-
-    def _merge_options(self, options: Options | None = None) -> FullOptions:
-        if options is None:
-            return self.options
-
-        # (defensive) set defaults for verify_x to False if verify_signature is False
-        if not options.get("verify_signature", True):
-            options["verify_exp"] = options.get("verify_exp", False)
-            options["verify_nbf"] = options.get("verify_nbf", False)
-            options["verify_iat"] = options.get("verify_iat", False)
-            options["verify_aud"] = options.get("verify_aud", False)
-            options["verify_iss"] = options.get("verify_iss", False)
-            options["verify_sub"] = options.get("verify_sub", False)
-            options["verify_jti"] = options.get("verify_jti", False)
-        return {**self.options, **options}
 
     def encode(
         self,
@@ -254,7 +232,7 @@ class PyJWT:
                 stacklevel=2,
             )
 
-        merged_options = self._merge_options(options)
+        merged_options = DecodeOptions.build(self.options, options)
 
         sig_options: SigOptions = {
             "verify_signature": verify_signature,
@@ -269,13 +247,15 @@ class PyJWT:
 
         payload = self._decode_payload(decoded)
 
-        self._validate_claims(
+        _claim_validator.validate(
             payload,
             merged_options,
-            audience=audience,
-            issuer=issuer,
-            leeway=leeway,
-            subject=subject,
+            ValidationContext.build(
+                audience=audience,
+                issuer=issuer,
+                subject=subject,
+                leeway=leeway,
+            ),
         )
 
         decoded["payload"] = payload
@@ -376,211 +356,16 @@ class PyJWT:
         )
         return cast(dict[str, Any], decoded["payload"])
 
-    def _validate_claims(
-        self,
-        payload: dict[str, Any],
-        options: FullOptions,
-        audience: Iterable[str] | str | None = None,
-        issuer: Container[str] | str | None = None,
-        subject: str | None = None,
-        leeway: float | timedelta = 0,
-    ) -> None:
-        if isinstance(leeway, timedelta):
-            leeway = leeway.total_seconds()
-
-        if audience is not None and not isinstance(audience, (str, Iterable)):
-            raise TypeError("audience must be a string, iterable or None")
-
-        self._validate_required_claims(payload, options["require"])
-
-        now = datetime.now(tz=timezone.utc).timestamp()
-
-        if "iat" in payload and options["verify_iat"]:
-            self._validate_iat(payload, now, leeway)
-
-        if "nbf" in payload and options["verify_nbf"]:
-            self._validate_nbf(payload, now, leeway)
-
-        if "exp" in payload and options["verify_exp"]:
-            self._validate_exp(payload, now, leeway)
-
-        if options["verify_iss"]:
-            self._validate_iss(payload, issuer)
-
-        if options["verify_aud"]:
-            self._validate_aud(
-                payload, audience, strict=options.get("strict_aud", False)
-            )
-
-        if options["verify_sub"]:
-            self._validate_sub(payload, subject)
-
-        if options["verify_jti"]:
-            self._validate_jti(payload)
-
-    def _validate_required_claims(
-        self,
-        payload: dict[str, Any],
-        claims: Iterable[str],
-    ) -> None:
-        for claim in claims:
-            if payload.get(claim) is None:
-                raise MissingRequiredClaimError(claim)
-
-    def _validate_sub(
-        self, payload: dict[str, Any], subject: str | None = None
-    ) -> None:
-        """
-        Checks whether "sub" if in the payload is valid or not.
-        This is an Optional claim
-
-        :param payload(dict): The payload which needs to be validated
-        :param subject(str): The subject of the token
-        """
-
-        if "sub" not in payload:
-            return
-
-        if not isinstance(payload["sub"], str):
-            raise InvalidSubjectError("Subject must be a string")
-
-        if subject is not None:
-            if payload.get("sub") != subject:
-                raise InvalidSubjectError("Invalid subject")
-
-    def _validate_jti(self, payload: dict[str, Any]) -> None:
-        """
-        Checks whether "jti" if in the payload is valid or not
-        This is an Optional claim
-
-        :param payload(dict): The payload which needs to be validated
-        """
-
-        if "jti" not in payload:
-            return
-
-        if not isinstance(payload.get("jti"), str):
-            raise InvalidJTIError("JWT ID must be a string")
-
-    def _validate_iat(
-        self,
-        payload: dict[str, Any],
-        now: float,
-        leeway: float,
-    ) -> None:
-        try:
-            iat = int(payload["iat"])
-        except ValueError:
-            raise InvalidIssuedAtError(
-                "Issued At claim (iat) must be an integer."
-            ) from None
-        if iat > (now + leeway):
-            raise ImmatureSignatureError("The token is not yet valid (iat)")
-
-    def _validate_nbf(
-        self,
-        payload: dict[str, Any],
-        now: float,
-        leeway: float,
-    ) -> None:
-        try:
-            nbf = int(payload["nbf"])
-        except ValueError:
-            raise DecodeError("Not Before claim (nbf) must be an integer.") from None
-
-        if nbf > (now + leeway):
-            raise ImmatureSignatureError("The token is not yet valid (nbf)")
-
-    def _validate_exp(
-        self,
-        payload: dict[str, Any],
-        now: float,
-        leeway: float,
-    ) -> None:
-        try:
-            exp = int(payload["exp"])
-        except ValueError:
-            raise DecodeError(
-                "Expiration Time claim (exp) must be an integer."
-            ) from None
-
-        if exp <= (now - leeway):
-            raise ExpiredSignatureError("Signature has expired")
-
-    def _validate_aud(
-        self,
-        payload: dict[str, Any],
-        audience: str | Iterable[str] | None,
-        *,
-        strict: bool = False,
-    ) -> None:
-        if audience is None:
-            if "aud" not in payload or not payload["aud"]:
-                return
-            # Application did not specify an audience, but
-            # the token has the 'aud' claim
-            raise InvalidAudienceError("Invalid audience")
-
-        if "aud" not in payload or not payload["aud"]:
-            # Application specified an audience, but it could not be
-            # verified since the token does not contain a claim.
-            raise MissingRequiredClaimError("aud")
-
-        audience_claims = payload["aud"]
-
-        # In strict mode, we forbid list matching: the supplied audience
-        # must be a string, and it must exactly match the audience claim.
-        if strict:
-            # Only a single audience is allowed in strict mode.
-            if not isinstance(audience, str):
-                raise InvalidAudienceError("Invalid audience (strict)")
-
-            # Only a single audience claim is allowed in strict mode.
-            if not isinstance(audience_claims, str):
-                raise InvalidAudienceError("Invalid claim format in token (strict)")
-
-            if audience != audience_claims:
-                raise InvalidAudienceError("Audience doesn't match (strict)")
-
-            return
-
-        if isinstance(audience_claims, str):
-            audience_claims = [audience_claims]
-        if not isinstance(audience_claims, list):
-            raise InvalidAudienceError("Invalid claim format in token")
-        if any(not isinstance(c, str) for c in audience_claims):
-            raise InvalidAudienceError("Invalid claim format in token")
-
-        if isinstance(audience, str):
-            audience = [audience]
-
-        if all(aud not in audience_claims for aud in audience):
-            raise InvalidAudienceError("Audience doesn't match")
+    # --- Delegation shim kept for backward compatibility with existing tests ---
+    # _validate_iss is the only private method called directly in the test suite.
+    # It forwards to ClaimValidator so PyJWT stays free of validation logic.
 
     def _validate_iss(
-        self, payload: dict[str, Any], issuer: Container[str] | str | None
+        self,
+        payload: dict[str, Any],
+        issuer: Container[str] | str | None,
     ) -> None:
-        if issuer is None:
-            return
-
-        if "iss" not in payload:
-            raise MissingRequiredClaimError("iss")
-
-        iss = payload["iss"]
-        if not isinstance(iss, str):
-            raise InvalidIssuerError("Payload Issuer (iss) must be a string")
-
-        if isinstance(issuer, str):
-            if iss != issuer:
-                raise InvalidIssuerError("Invalid issuer")
-        else:
-            try:
-                if iss not in issuer:
-                    raise InvalidIssuerError("Invalid issuer")
-            except TypeError:
-                raise InvalidIssuerError(
-                    'Issuer param must be "str" or "Container[str]"'
-                ) from None
+        _claim_validator._validate_iss(payload, issuer)
 
 
 _jwt_global_obj = PyJWT()
