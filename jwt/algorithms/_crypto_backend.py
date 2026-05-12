@@ -4,11 +4,11 @@ import sys
 from typing import Union
 
 try:
-    from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
-    from cryptography.hazmat.backends import default_backend
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives.asymmetric.ec import (
+    from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm  # noqa: F401
+    from cryptography.hazmat.backends import default_backend  # noqa: F401
+    from cryptography.hazmat.primitives import hashes  # noqa: F401
+    from cryptography.hazmat.primitives.asymmetric import padding  # noqa: F401
+    from cryptography.hazmat.primitives.asymmetric.ec import (  # noqa: F401
         ECDSA,
         SECP256K1,
         SECP256R1,
@@ -20,15 +20,15 @@ try:
         EllipticCurvePublicKey,
         EllipticCurvePublicNumbers,
     )
-    from cryptography.hazmat.primitives.asymmetric.ed448 import (
+    from cryptography.hazmat.primitives.asymmetric.ed448 import (  # noqa: F401
         Ed448PrivateKey,
         Ed448PublicKey,
     )
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: F401
         Ed25519PrivateKey,
         Ed25519PublicKey,
     )
-    from cryptography.hazmat.primitives.asymmetric.rsa import (
+    from cryptography.hazmat.primitives.asymmetric.rsa import (  # noqa: F401
         RSAPrivateKey,
         RSAPrivateNumbers,
         RSAPublicKey,
@@ -38,7 +38,7 @@ try:
         rsa_crt_iqmp,
         rsa_recover_prime_factors,
     )
-    from cryptography.hazmat.primitives.serialization import (
+    from cryptography.hazmat.primitives.serialization import (  # noqa: F401
         Encoding,
         NoEncryption,
         PrivateFormat,
@@ -47,7 +47,7 @@ try:
         load_pem_public_key,
         load_ssh_public_key,
     )
-    from cryptography.hazmat.primitives.asymmetric.types import (
+    from cryptography.hazmat.primitives.asymmetric.types import (  # noqa: F401
         PrivateKeyTypes,
         PublicKeyTypes,
     )

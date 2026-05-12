@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from functools import lru_cache
 from ssl import SSLContext
 from typing import Any
@@ -8,7 +7,6 @@ from typing import Any
 from .api_jwk import PyJWK, PyJWKSet
 from .api_jwt import decode_complete as decode_token
 from .exceptions import (
-    PyJWKClientConnectionError,
     PyJWKClientError,
     PyJWKSetError,
 )
